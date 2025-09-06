@@ -44,37 +44,36 @@ jobs:
       - name: Buat cookies dari Secret
         run: echo "${{ secrets.YT_COOKIES }}" > cookies.txt
 
-      - name: Potong video langsung dari YouTube
+      - name: Ambil direct stream URL
         run: |
-          if [ "${{ github.event.inputs.fps }}" = "original" ]; then
-            FPS_ARG=""
-          else
-            FPS_ARG="--postprocessor-args \"-r ${{ github.event.inputs.fps }}\""
-          fi
+          yt-dlp --cookies cookies.txt -g \
+            -f "bv*[vcodec^=avc1][height<=${{ github.event.inputs.resolution }}]+ba/b[height<=${{ github.event.inputs.resolution }}]" \
+            "${{ github.event.inputs.url }}" > urls.txt
 
-          if [ "${{ github.event.inputs.bitrate }}" = "auto" ]; then
-            BITRATE_ARG=""
-          else
-            BITRATE_ARG="--postprocessor-args \"-b:v ${{ github.event.inputs.bitrate }}\""
+          echo "VIDEO_URL=$(head -n1 urls.txt)" >> $GITHUB_ENV
+          echo "AUDIO_URL=$(tail -n1 urls.txt)" >> $GITHUB_ENV
+
+      - name: Potong segmen dengan ffmpeg
+        run: |
+          FPS="${{ github.event.inputs.fps }}"
+          BITRATE="${{ github.event.inputs.bitrate }}"
+
+          EXTRA_ARGS=""
+          if [ "$FPS" != "original" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS -r $FPS"
+          fi
+          if [ "$BITRATE" != "auto" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS -b:v $BITRATE"
           fi
 
           i=1
           for SEG in ${{ github.event.inputs.segments }}; do
             echo "🎬 Potong segmen $SEG ..."
+            START=$(echo $SEG | cut -d- -f1)
+            END=$(echo $SEG | cut -d- -f2)
 
-            yt-dlp --cookies cookies.txt \
-              -f "bv*[vcodec^=avc1][height<=${{ github.event.inputs.resolution }}]+ba/b[height<=${{ github.event.inputs.resolution }}]" \
-              --download-sections "*$SEG" \
-              --merge-output-format mp4 \
-              -o "clip${i}.%(ext)s" \
-              "${{ github.event.inputs.url }}" || true
-
-            # kalau hasil bukan mp4 → re-encode ke mp4 (H264 + AAC)
-            if [ -f "clip${i}.webm" ]; then
-              echo "⚡ Convert clip${i}.webm ke MP4..."
-              ffmpeg -i "clip${i}.webm" -c:v libx264 -preset fast -crf 23 -c:a aac "clip${i}.mp4"
-              rm -f "clip${i}.webm"
-            fi
+            ffmpeg -ss $START -to $END -i "$VIDEO_URL" -i "$AUDIO_URL" \
+              -c:v libx264 -preset fast -crf 23 -c:a aac $EXTRA_ARGS -shortest "clip${i}.mp4"
 
             i=$((i+1))
           done
@@ -86,4 +85,4 @@ jobs:
           path: "*.mp4"
 
       - name: Bersihkan file lama
-        run: rm -f source.* clip*.webm
+        run: rm -f urls.txt
