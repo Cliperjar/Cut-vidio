@@ -1,4 +1,4 @@
-name: YouTube Multi-Cut (Safe H264)
+name: YouTube Single-Cut (Safe H264 + Fallback)
 
 on:
   workflow_dispatch:
@@ -6,8 +6,8 @@ on:
       url:
         description: "URL YouTube"
         required: true
-      segments:
-        description: "Segmen waktu (contoh: 01:14:00-01:14:23 02:00:00-02:00:25)"
+      segment:
+        description: "Segmen waktu (contoh: 00:06:16-00:06:45)"
         required: true
       resolution:
         description: "Resolusi maksimal"
@@ -44,45 +44,41 @@ jobs:
       - name: Buat cookies dari Secret
         run: echo "${{ secrets.YT_COOKIES }}" > cookies.txt
 
-      - name: Ambil direct stream URL
+      - name: Potong video dengan fallback
         run: |
-          yt-dlp --cookies cookies.txt -g \
+          # Normalisasi input (hapus spasi, ganti en-dash jadi minus)
+          SEG_RAW="${{ github.event.inputs.segment }}"
+          SEG=$(echo "$SEG_RAW" | sed 's/–/-/g' | sed 's/ //g')
+          START=$(echo $SEG | cut -d'-' -f1)
+          END=$(echo $SEG | cut -d'-' -f2)
+
+          echo "🎬 Coba ambil langsung segmen: $SEG"
+
+          yt-dlp --cookies cookies.txt \
             -f "bv*[vcodec^=avc1][height<=${{ github.event.inputs.resolution }}]+ba/b[height<=${{ github.event.inputs.resolution }}]" \
-            "${{ github.event.inputs.url }}" > urls.txt
+            --download-sections "*$SEG" \
+            --merge-output-format mp4 \
+            -o "clip.mp4" \
+            "${{ github.event.inputs.url }}" || true
 
-          echo "VIDEO_URL=$(head -n1 urls.txt)" >> $GITHUB_ENV
-          echo "AUDIO_URL=$(tail -n1 urls.txt)" >> $GITHUB_ENV
+          # fallback kalau gagal
+          if [ ! -s "clip.mp4" ]; then
+            echo "⚠️ Gagal ambil langsung. Download full video..."
+            yt-dlp --cookies cookies.txt \
+              -f "bv*[vcodec^=avc1][height<=${{ github.event.inputs.resolution }}]+ba/b[height<=${{ github.event.inputs.resolution }}]" \
+              -o "full.%(ext)s" \
+              "${{ github.event.inputs.url }}"
 
-      - name: Potong segmen dengan ffmpeg
-        run: |
-          FPS="${{ github.event.inputs.fps }}"
-          BITRATE="${{ github.event.inputs.bitrate }}"
-
-          EXTRA_ARGS=""
-          if [ "$FPS" != "original" ]; then
-            EXTRA_ARGS="$EXTRA_ARGS -r $FPS"
+            echo "✂️ Potong dengan ffmpeg..."
+            ffmpeg -i full.mp4 -ss $START -to $END -c:v libx264 -preset fast -crf 23 -c:a aac clip.mp4
+            rm -f full.*
           fi
-          if [ "$BITRATE" != "auto" ]; then
-            EXTRA_ARGS="$EXTRA_ARGS -b:v $BITRATE"
-          fi
-
-          i=1
-          for SEG in ${{ github.event.inputs.segments }}; do
-            echo "🎬 Potong segmen $SEG ..."
-            START=$(echo $SEG | cut -d- -f1)
-            END=$(echo $SEG | cut -d- -f2)
-
-            ffmpeg -ss $START -to $END -i "$VIDEO_URL" -i "$AUDIO_URL" \
-              -c:v libx264 -preset fast -crf 23 -c:a aac $EXTRA_ARGS -shortest "clip${i}.mp4"
-
-            i=$((i+1))
-          done
 
       - name: Upload hasil
         uses: actions/upload-artifact@v4
         with:
-          name: youtube-multi-cut
-          path: "*.mp4"
+          name: youtube-single-cut
+          path: clip.mp4
 
       - name: Bersihkan file lama
-        run: rm -f urls.txt
+        run: rm -f source.* clip*.webm
